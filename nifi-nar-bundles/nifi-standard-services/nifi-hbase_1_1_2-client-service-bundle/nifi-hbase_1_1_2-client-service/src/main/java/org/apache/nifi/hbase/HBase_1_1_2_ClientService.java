@@ -488,3 +488,4 @@ public class HBase_1_1_2_ClientService extends AbstractControllerService impleme
         return Bytes.toBytesBinary(s);
     }
 }
+/* Test */
