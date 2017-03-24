@@ -58,8 +58,9 @@ import java.nio.charset.StandardCharsets;
 @Tags({"dedupe", "dupe", "duplicate", "hash", "hbase", "get"})
 @CapabilityDescription(
    "Using HBase, caches a value, computed from FlowFile attributes, for each incoming FlowFile and determines if the cached value has already been seen. " +
-   "If so, routes the file to 'duplicate' "
-   
+   "If so, routes the file to 'duplicate'. " +
+   "Otherwise, routes the file to 'non-duplicate'. " +
+   "Useful as an HBase-based substitute for the DetectDuplicate processor." 
 )
 @SeeAlso({})
 @ReadsAttributes({@ReadsAttribute(attribute="", description="")})
@@ -77,67 +78,67 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         "processor to add identifiers to the HBase cache.");
 
     public static final PropertyDescriptor CACHE_ENTRY_IDENTIFIER = new PropertyDescriptor.Builder()
-            .name("Cache Entry Identifier")
-            .description(
-                    "A FlowFile attribute, or the results of an Attribute Expression Language statement, which will be evaluated "
-                    + "against a FlowFile in order to determine the value used to identify duplicates; it is this value that is cached")
-            .required(true)
-            .addValidator(StandardValidators.createAttributeExpressionLanguageValidator(ResultType.STRING, true))
-            .defaultValue("${hash.value}")
-            .expressionLanguageSupported(true)
-            .build();
+        .name("Cache Entry Identifier")
+        .description(
+            "A FlowFile attribute, or the results of an Attribute Expression Language statement, which will be evaluated"
+            + " against a FlowFile in order to determine the value used to identify duplicates."
+            + " This value will be cached, meaning it will be used as the HBase row key.")
+        .required(true)
+        .addValidator(StandardValidators.createAttributeExpressionLanguageValidator(ResultType.STRING, true))
+        .defaultValue("${hash.value}")
+        .expressionLanguageSupported(true)
+        .build();
 
     public static final PropertyDescriptor UPDATE_CACHE_METHOD = new PropertyDescriptor.Builder()
-            .name("Update cache method")
-            .description("How/when the cache should be updated. ") 
-            .required(true)
-            .allowableValues(UPDATE_CACHE_ALWAYS, UPDATE_CACHE_NEW, UPDATE_CACHE_NEVER)
-            .defaultValue(UPDATE_CACHE_ALWAYS.getValue())
-            .build();
+        .name("Update cache method")
+        .description("Controls when the cache should be updated. ") 
+        .required(true)
+        .allowableValues(UPDATE_CACHE_ALWAYS, UPDATE_CACHE_NEW, UPDATE_CACHE_NEVER)
+        .defaultValue(UPDATE_CACHE_ALWAYS.getValue())
+        .build();
 
     static final PropertyDescriptor HBASE_CLIENT_SERVICE = new PropertyDescriptor.Builder()
-            .name("HBase Client Service")
-            .description("Specifies the Controller Service to use for accessing HBase.")
-            .required(true)
-            .identifiesControllerService(HBaseClientService.class)
-            .build();
+        .name("HBase Client Service")
+        .description("Specifies the Controller Service to use for accessing HBase.")
+        .required(true)
+        .identifiesControllerService(HBaseClientService.class)
+        .build();
 
     public static final PropertyDescriptor HBASE_TABLE_NAME = new PropertyDescriptor.Builder()
-            .name("HBase table name")
-            .description(
-                    "Name of the HBase table to use for the cache ")
-            .required(true)
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
-            .expressionLanguageSupported(true)
-            .build();
+        .name("HBase table name")
+        .description("Name of the HBase table to use for the cache. Must exist.")
+        .required(true)
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .expressionLanguageSupported(true)
+        .build();
 
     public static final PropertyDescriptor COLUMN_MAPPING = new PropertyDescriptor.Builder()
-            .name("HBase column mapping")
-            .description(
-                    "Comma-separated list which maps HBase columns to attributes. Each element in the list is of the form " +
-                    "<columnFamily>:<columnQualifier>=<value>. The list may contain Attribute Expression Language statements " +
-                    ", which will be evaluated against a FlowFile. " +
-                    "Each element is stored in HBase against the Cache Entry Identifier for the FlowFile."
-                    )
-            .required(true)
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
-            .expressionLanguageSupported(true)
-            .defaultValue("f:filename=${filename},f:uuid=${uuid}")
-            .build();
+        .name("HBase column mapping")
+        .description(
+            "Comma-separated list which maps HBase columns to FlowFile attributes. Each element in the list is of the form" 
+            + " <columnFamily>:<columnQualifier>=<value>. The list may contain Attribute Expression Language statements" 
+            + " , which will be evaluated against a FlowFile." 
+            + " Each element is stored in HBase against the Cache Entry Identifier for the FlowFile.")
+        .required(true)
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .expressionLanguageSupported(true)
+        .defaultValue("f:filename=${filename},f:uuid=${uuid}")
+        .build();
 
     public static final Relationship REL_DUPLICATE = new Relationship.Builder()
-            .name("duplicate")
-            .description("If a FlowFile has been detected to be a duplicate, it will be routed to this relationship")
-            .build();
+        .name("duplicate")
+        .description("If a FlowFile has been detected to be a duplicate, it will be routed to this relationship")
+        .build();
 
     public static final Relationship REL_NON_DUPLICATE = new Relationship.Builder()
-            .name("non-duplicate")
-            .description("If a FlowFile's Cache Entry Identifier was not found in the cache, it will be routed to this relationship")
-            .build();
+        .name("non-duplicate")
+        .description("If a FlowFile's Cache Entry Identifier was not found in the cache, it will be routed to this relationship")
+        .build();
+
     public static final Relationship REL_FAILURE = new Relationship.Builder()
-            .name("failure")
-            .description("If unable to communicate with the cache, the FlowFile will be penalized and routed to this relationship")
-            .build();
+        .name("failure")
+        .description("If unable to communicate with the cache, the FlowFile will be penalized and routed to this relationship")
+        .build();
 
     private List<PropertyDescriptor> descriptors;
 
@@ -183,7 +184,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         }
         final ComponentLog logger = getLogger();
 
-        // Get the specified flowfile attribute
+        // Get the specified flowfile attribute which is used as the file ID
         final String cacheKey = context.getProperty(CACHE_ENTRY_IDENTIFIER).evaluateAttributeExpressions(flowFile).getValue();
         if (StringUtils.isBlank(cacheKey)) {
             logger.error("FlowFile {} has no attribute for given Cache Entry Identifier", new Object[]{flowFile});
@@ -195,7 +196,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         final String tableName = context.getProperty(HBASE_TABLE_NAME).evaluateAttributeExpressions(flowFile).getValue();
         final HBaseClientService hBaseClientService = context.getProperty(HBASE_CLIENT_SERVICE).asControllerService(HBaseClientService.class); 
       
-        // Check cache for ID 
+        // Check the HBase cache table for the file ID 
         final RowCountHandler handler = new RowCountHandler();
 
         final String rowId=cacheKey;
@@ -214,13 +215,15 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
 
         final boolean duplicate = (handler.handledRow > 0);
 
-        // Add ID to the cache
+        // Add the file ID to the HBase cache table (if required)
         final String updateCacheMethod = context.getProperty(UPDATE_CACHE_METHOD).getValue();
         final String columnMapping = context.getProperty(COLUMN_MAPPING).evaluateAttributeExpressions(flowFile).getValue();
 
         final boolean updateCache = ( UPDATE_CACHE_ALWAYS.equals(updateCacheMethod) || (UPDATE_CACHE_NEW.equals(updateCacheMethod) && !duplicate));
         try {
-            if (updateCache) updateCache(hBaseClientService, tableName, rowIdBytes, columnMapping);
+
+            if (updateCache) updateHBaseCache(hBaseClientService, tableName, rowIdBytes, columnMapping);
+
         } catch (Exception e) {
             session.getProvenanceReporter().route(flowFile, REL_FAILURE);
             logger.error("Unable to update HBase table {} row {} due to {}", new Object[] {tableName, rowId, e});
@@ -242,7 +245,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         }
     }
 
-    private void updateCache(HBaseClientService hBaseClientService, String tableName, byte[] rowIdBytes, String columnMapping) throws IOException {
+    private void updateHBaseCache(HBaseClientService hBaseClientService, String tableName, byte[] rowIdBytes, String columnMapping) throws IOException {
         final String[] mappings = (columnMapping == null || columnMapping.isEmpty() ? new String[0] : columnMapping.split(","));
 
         List<PutColumn> putColumns = new ArrayList<PutColumn>(mappings.length);
