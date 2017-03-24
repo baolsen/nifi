@@ -58,14 +58,21 @@ import java.nio.charset.StandardCharsets;
 @Tags({"dedupe", "dupe", "duplicate", "hash", "hbase", "get"})
 @CapabilityDescription(
    "Using HBase, caches a value, computed from FlowFile attributes, for each incoming FlowFile and determines if the cached value has already been seen. " +
-   "If so, routes the file to 'duplicate'. " +
+   "If so, routes the file to 'duplicate' with an attribute named 'duplicate.flowfile.properties' that contains the properties of the already seen flowfile. " +
    "Otherwise, routes the file to 'non-duplicate'. " +
-   "Useful as an HBase-based substitute for the DetectDuplicate processor." 
+   "Useful as an HBase-based substitute for the DetectDuplicate processor."
 )
 @SeeAlso({})
 @ReadsAttributes({@ReadsAttribute(attribute="", description="")})
-@WritesAttributes({@WritesAttribute(attribute="", description="")})
+@WritesAttributes({@WritesAttribute(
+    attribute="duplicate.flowfile.properties", 
+    description="All FlowFiles routed to the duplicate relationship will have "
+        + "an attribute added named duplicate.flowfile.description. The value of this attribute is determined by the attributes of a previously seen flowfile. "
+        + "The previously seen flowfile may be the original (first) flowfile or the most recent duplicate, depending on the value for Cache Update Method.")
+    })
 public class DetectDuplicateUsingHBase extends AbstractProcessor {
+
+    public static final String DUPLICATE_FLOWFILE_PROPERTIES_ATTRIBUTE = "duplicate.flowfile.properties";
 
     public static final AllowableValue UPDATE_CACHE_ALWAYS = new AllowableValue("Always", "Always",
 	"Cache will always be updated, whether or not an entry exists already.");
@@ -90,7 +97,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         .build();
 
     public static final PropertyDescriptor UPDATE_CACHE_METHOD = new PropertyDescriptor.Builder()
-        .name("Update cache method")
+        .name("Cache Update Method")
         .description("Controls when the cache should be updated. ") 
         .required(true)
         .allowableValues(UPDATE_CACHE_ALWAYS, UPDATE_CACHE_NEW, UPDATE_CACHE_NEVER)
@@ -105,7 +112,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         .build();
 
     public static final PropertyDescriptor HBASE_TABLE_NAME = new PropertyDescriptor.Builder()
-        .name("HBase table name")
+        .name("HBase Table Name")
         .description("Name of the HBase table to use for the cache. Must exist.")
         .required(true)
         .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
@@ -113,7 +120,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         .build();
 
     public static final PropertyDescriptor COLUMN_MAPPING = new PropertyDescriptor.Builder()
-        .name("HBase column mapping")
+        .name("HBase Column Mapping")
         .description(
             "Comma-separated list which maps HBase columns to FlowFile attributes. Each element in the list is of the form" 
             + " <columnFamily>:<columnQualifier>=<value>. The list may contain Attribute Expression Language statements" 
@@ -197,7 +204,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         final HBaseClientService hBaseClientService = context.getProperty(HBASE_CLIENT_SERVICE).asControllerService(HBaseClientService.class); 
       
         // Check the HBase cache table for the file ID 
-        final RowCountHandler handler = new RowCountHandler();
+        final HBaseRowHandler handler = new HBaseRowHandler();
 
         final String rowId=cacheKey;
         final byte[] rowIdBytes=rowId.getBytes(StandardCharsets.UTF_8);
@@ -213,7 +220,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
             return;
         }
 
-        final boolean duplicate = (handler.handledRow > 0);
+        final boolean duplicate = (handler.numRows > 0);
 
         // Add the file ID to the HBase cache table (if required)
         final String updateCacheMethod = context.getProperty(UPDATE_CACHE_METHOD).getValue();
@@ -231,10 +238,12 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         }
 
         if (duplicate) {
-            // TODO originalFlowFileDescription
+            String duplicateFlowFileProperties=handler.getLastResultString();
+            flowFile = session.putAttribute(flowFile, DUPLICATE_FLOWFILE_PROPERTIES_ATTRIBUTE, duplicateFlowFileProperties);
+
             session.getProvenanceReporter().route(flowFile, REL_DUPLICATE);
             session.transfer(flowFile, REL_DUPLICATE);
-            logger.info("Found {} to be a duplicate of FlowFile ", new Object[]{flowFile});
+            logger.info("Found {} to be a duplicate of FlowFile with description {}", new Object[]{flowFile, duplicateFlowFileProperties});
             session.adjustCounter("Duplicates Detected", 1L, false);
         }
         else {
@@ -265,15 +274,26 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         hBaseClientService.put(tableName, rowIdBytes, putColumns);
     }
 
-    private static class RowCountHandler implements ResultHandler {
-        private int handledRow = 0;
+    private static class HBaseRowHandler implements ResultHandler {
+        private int numRows = 0;
+        private String lastResultString = "";
 
         @Override
         public void handle(byte[] row, ResultCell[] resultCells) {
-            handledRow += 1;
+            numRows += 1;
+            lastResultString="";
+            for( final ResultCell resultCell : resultCells ){
+                final String columnFamily    = new String(resultCell.getFamilyArray() );
+                final String columnQualifier = new String(resultCell.getQualifierArray() );
+                final String value           = new String(resultCell.getValueArray() );
+                lastResultString = columnFamily + ":" + columnQualifier + "=" + value;
+            }
         }
-        public int handledRow() {
-            return handledRow;
+        public int numRows() {
+            return numRows;
+        }
+        public String getLastResultString() {
+           return lastResultString;
         }
 
     }
