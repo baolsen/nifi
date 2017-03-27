@@ -196,6 +196,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
         if (StringUtils.isBlank(cacheKey)) {
             logger.error("FlowFile {} has no attribute for given Cache Entry Identifier", new Object[]{flowFile});
             flowFile = session.penalize(flowFile);
+            session.getProvenanceReporter().route(flowFile, REL_FAILURE);
             session.transfer(flowFile, REL_FAILURE);
             return;
         }
@@ -215,7 +216,7 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
             hBaseClientService.scan(tableName, rowIdBytes, rowIdBytes, columnsList, handler);
         } catch (Exception e) {
             session.getProvenanceReporter().route(flowFile, REL_FAILURE);
-            logger.error("Unable to fetch row {} from  {} due to {}", new Object[] {rowId, tableName, e});
+            logger.error("Unable to fetch row {} from HBase table {} due to {}", new Object[] {rowId, tableName, e});
             session.transfer(flowFile, REL_FAILURE);
             return;
         }
@@ -224,17 +225,17 @@ public class DetectDuplicateUsingHBase extends AbstractProcessor {
 
         // Add the file ID to the HBase cache table (if required)
         final String updateCacheMethod = context.getProperty(UPDATE_CACHE_METHOD).getValue();
-        final String columnMapping = context.getProperty(COLUMN_MAPPING).evaluateAttributeExpressions(flowFile).getValue();
-
         final boolean updateCache = ( UPDATE_CACHE_ALWAYS.equals(updateCacheMethod) || (UPDATE_CACHE_NEW.equals(updateCacheMethod) && !duplicate));
         try {
 
+            final String columnMapping = context.getProperty(COLUMN_MAPPING).evaluateAttributeExpressions(flowFile).getValue();
             if (updateCache) updateHBaseCache(hBaseClientService, tableName, rowIdBytes, columnMapping);
 
         } catch (Exception e) {
             session.getProvenanceReporter().route(flowFile, REL_FAILURE);
             logger.error("Unable to update HBase table {} row {} due to {}", new Object[] {tableName, rowId, e});
             session.transfer(flowFile, REL_FAILURE);
+            return;
         }
 
         if (duplicate) {
